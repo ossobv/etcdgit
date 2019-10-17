@@ -1,0 +1,209 @@
+#!/bin/bash
+# etcdgit -- Keep track of etcd(1) history using a Git repository
+# Copyright (C) 2019 Walter Doekes, OSSO B.V.
+#
+# etcdgit is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation, either version 3 of the License, or (at your
+# option) any later version.
+#
+# etcdgit has been tested against etcdctl version 3.3.12 with API 3.
+#
+# Usage:
+# - set up repository in /srv/etcdgit (see GIT_DIR)
+# - run cron job: 35 0,12 * * * root /usr/local/bin/etcdgit update-all
+#
+# Dependencies: git, bash (uses bashisms), dd, sed.
+#
+# See also: dnsgit <https://github.com/ossobv/dnsgit/>
+# See also: mailgit <https://github.com/ossobv/mailgit/>
+
+
+########################################################################
+# Default configuration, override through /etc/default/etcdgit.
+########################################################################
+_etcdctl() {
+    ETCDCTL_API=3 etcdctl \
+      --cert /etc/etcd/pki/client.crt --key /etc/etcd/pki/client.key \
+      --cacert /etc/etcd/pki/root-ca.crt --endpoints=$ETCD_ENDPOINT \
+      "$@"
+}
+ETCD_ENDPOINT=https://127.0.0.1:2379
+ETCDCTL=_etcdctl
+GIT_DIR=/srv/etcdgit
+########################################################################
+
+
+short_help_and_exit() {
+    echo "Usage: etcdgit COMMAND ARGS.." >&2
+    echo "See: etcdgit help" >&2
+    exit 1
+}
+
+# Optionally load configuration from /etc/default/etcdgit.
+test -f /etc/default/etcdgit && . /etc/default/etcdgit
+
+# Use same sorting for sort and comm.
+LC_ALL=C; LC_COLLATE=C
+export LC_ALL
+export LC_COLLATE
+
+set -eu
+cd "$GIT_DIR"
+test -d .git
+cmd="${1:-}"
+test -z "$cmd" && short_help_and_exit
+shift
+
+
+etcd_get_keys() {
+    $ETCDCTL get '' --prefix=true --keys-only | sed -e '/^$/d' | sort
+}
+
+etcd_keys_to_paths() {
+    while read -r key; do key_to_path && echo "$path"; done | sort |
+        sed -e '/[.][.]/d;/^[/]/d'  # safeguard
+}
+
+etcd_get_all() {
+    $ETCDCTL get '' --prefix=true --write-out fields
+}
+
+etcd_all_to_paths() {
+    sed -e '/^"Key"/!d;s/^"[^"]*" *: *"\(.*\)"$/\1/' |
+    while read -r key; do key_to_path && echo "$path"; done | sort |
+        sed -e '/[.][.]/d;/^[/]/d'  # safeguard
+}
+
+etcd_all_to_values() {
+    sed -e '/^"Key"\|^"Value"/!d;s/^"[^"]*" *: *"\(.*\)"$/\1/;s/%/%%/g' |
+    while read -r key; do
+        read -r encvalue
+        key_to_path || continue
+        if [[ "$path" = '/'* ]] || [[ "$path" = *..* ]]; then
+            echo "ERROR: safeguard tripped on '$path'" >&2
+            exit 1
+        fi
+        mkdir -p "${path%/*}" 2>/dev/null || true
+        printf "$encvalue" >"$path"
+        # (git add "$path")
+    done
+}
+
+local_get_paths() {
+    git ls-files | sort | sed -e '/[.][.]/d;/^[/]/d'  # safeguard
+}
+
+key_to_path() {
+    if [[ "$key" = *..* ]] || [[ "$key" = .* ]] || [[ "$key" = *' '* ]] || \
+            [[ "$key" = *'/' ]]; then
+        # We don't want .. in our paths.
+        # We don't want a leading period (as WE are using that).
+        # We don't expect spaces (right now).
+        # We don't expect trailing slashes (right now).
+        echo "ERROR: skipping '$key'" >&2
+        path=
+        false
+    elif [[ "$key" != /* ]]; then
+        path=.$key
+    else
+        path=${key#/}
+    fi
+}
+
+update_repo() {
+    new_all=$(mktemp)
+    old_paths=$(mktemp)
+    new_paths=$(mktemp)
+    trap 'rm "$new_all" "$old_paths" "$new_paths"' EXIT
+
+    etcd_get_all >"$new_all"
+    local_get_paths > "$old_paths"
+    etcd_all_to_paths >"$new_paths" <"$new_all"
+
+    # Remove old keys
+    comm --nocheck-order -23 "$old_paths" "$new_paths" |
+    while read removed_key; do
+        git rm --quiet "$removed_key"
+    done
+
+    # Add new keys
+    etcd_all_to_values <"$new_all"
+
+    # Cleanup
+    rm "$new_all" "$old_paths" "$new_paths"
+    trap - EXIT
+}
+
+generate_commit_msg() {
+    # Sort makes A(added) files come first. More important..
+    first_files=$(
+        git status --porcelain | sort |
+            sed -ne 's#^[^ ]..\(.*/\)\?\([^/]*\)#\2,#p' |
+            dd bs=72 count=1 2>/dev/null | tr '\n' ' ')
+    echo "changed: $first_files..."
+}
+
+
+case $cmd in
+help|-h|--help)
+    echo "Usage: etcdgit COMMAND ARGS.."
+    echo
+    echo "Commands:"
+    echo "  keys          List keys to dump."
+    echo "  paths         List paths for keys."
+    echo "  update-all    Dump values, remove old, commit."
+    ;;
+keys)
+    etcd_get_keys
+    ;;
+paths)
+    etcd_get_keys | etcd_keys_to_paths
+    ;;
+update-all)
+    update_repo
+
+    # Add all changed. Faster than doing a git add for each file.
+    git add -A
+    ret=0
+
+    # All data-changes go into a separate (silent) commit. So we unset all
+    # data's.
+    git reset --quiet ".compact_rev_key" 2>/dev/null || true
+    git status --porcelain | grep '^M ' | sed -e 's/^...//' | while read f; do
+        test "$(file --brief "$f")" = data && git reset --quiet "$f"
+    done
+
+    # Attempt commit of interesting changes first.
+    if git status --porcelain | grep -qv '^ '; then
+        msg=$(generate_commit_msg)
+        git commit -m "$msg" >/dev/null || ret=$?
+        if test -t 1; then
+            echo "Committed: $msg"
+        else
+            git show
+        fi
+    fi
+
+    # Is there anything left? Create commit message and push.
+    git add -A
+    if git status --porcelain | grep -qF ''; then
+        msg="data: Data changes"  # be silent about this commit
+        git commit -m "$msg" >/dev/null || ret=$?
+        if test -t 1; then
+            echo "Committed: $msg"
+        fi
+    fi
+
+    if [[ $ret -ne 0 ]]; then
+        echo >&2
+        echo "There were errors. See above." >&2
+        false
+    fi
+    ;;
+*)
+    short_help_and_exit
+    ;;
+esac
+
+# vim: set ts=8 sw=4 sts=4 et ai:
