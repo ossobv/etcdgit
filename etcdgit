@@ -34,8 +34,21 @@ _etcdctl() {
       --cacert /etc/etcd/pki/root-ca.crt --endpoints=$ETCD_ENDPOINT \
       "$@"
 }
+_printf_as_yaml_if_possible() {
+    printf "$1" | python3 -c '
+import json,sys,yaml
+x=sys.stdin.buffer.read()
+try:
+    y=yaml.dump(json.loads(x.decode("utf-8")))
+except Exception:
+    sys.stdout.buffer.write(x)
+else:
+    sys.stdout.write(y)
+'
+}
 ETCD_ENDPOINT=https://127.0.0.1:2379
 ETCDCTL=_etcdctl
+VALUEDECODE=printf  # or _printf_as_yaml_if_possible
 GIT_DIR=/srv/etcdgit
 ########################################################################
 
@@ -97,7 +110,7 @@ etcd_all_to_values() {
         test "${dirname}" != "${path}" && \
             mkdir -p "${dirname}" 2>/dev/null || true
         # Write file
-        printf "$encvalue" >"$path"
+        $VALUEDECODE "$encvalue" >"$path"
         # (git add "$path")
     done
 }
