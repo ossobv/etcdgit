@@ -164,7 +164,7 @@ generate_commit_msg() {
     # Sort makes A(added) files come first. More important..
     first_files=$(
         git status --porcelain | sort |
-            sed -ne 's#^[^ ]..\(.*/\)\?\([^/]*\)#\2,#p' |
+            sed -ne 's#^[^? ]..\(.*/\)\?\([^/]*\)#\2,#p' |
             dd bs=72 count=1 2>/dev/null | tr '\n' ' ')
     echo "changed: $first_files..."
 }
