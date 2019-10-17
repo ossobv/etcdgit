@@ -61,6 +61,8 @@ etcd_get_keys() {
 }
 
 etcd_keys_to_paths() {
+    # - Drop *..* (unexpected combinations)
+    # - Drop leading slashes (should've been translated already)
     while read -r key; do key_to_path && echo "$path"; done | sort |
         sed -e '/[.][.]/d;/^[/]/d'  # safeguard
 }
@@ -84,7 +86,11 @@ etcd_all_to_values() {
             echo "ERROR: safeguard tripped on '$path'" >&2
             exit 1
         fi
-        mkdir -p "${path%/*}" 2>/dev/null || true
+        # Make all dir paths up to basename(path)
+        local dirname="${path%/*}"
+        test "${dirname}" != "${path}" && \
+            mkdir -p "${dirname}" 2>/dev/null || true
+        # Write file
         printf "$encvalue" >"$path"
         # (git add "$path")
     done
@@ -167,8 +173,10 @@ update-all)
     git add -A
     ret=0
 
-    # All data-changes go into a separate (silent) commit. So we unset all
-    # data's.
+    # All data/binary-changes go into a separate (silent) commit, in the second
+    # pass:
+    # - unset (expected) .compact_rev_key changes from the first commit
+    # - unset the binary-file-changes from the first commit
     git reset --quiet ".compact_rev_key" 2>/dev/null || true
     git status --porcelain | grep '^M ' | sed -e 's/^...//' | while read f; do
         test "$(file --brief "$f")" = data && git reset --quiet "$f"
@@ -179,9 +187,11 @@ update-all)
         msg=$(generate_commit_msg)
         git commit -m "$msg" >/dev/null || ret=$?
         if test -t 1; then
+            # Is stdout a tty? Write a short summary.
             echo "Committed: $msg"
         else
-            git show
+            # Otherwise output the entire change (for cron mail?).
+            git show | head -n4096
         fi
     fi
 
@@ -191,6 +201,7 @@ update-all)
         msg="data: Data changes"  # be silent about this commit
         git commit -m "$msg" >/dev/null || ret=$?
         if test -t 1; then
+            # Is stdout a tty? Write a short summary.
             echo "Committed: $msg"
         fi
     fi
