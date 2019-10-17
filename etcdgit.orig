@@ -13,13 +13,7 @@
 # - set up repository in /srv/etcdgit (see GIT_DIR)
 # - run cron job: 35 0,12 * * * root /usr/local/bin/etcdgit update-all
 #
-# (You'll probably want to redirect stdout to /dev/null, as the changes
-# come largely unfiltered.)
-# (We may want to auto-squash data, because we'll also store all sorts
-# of binary k8s changes.)
-# (In the future, maybe add a command to repopulate etcd from this data?)
-#
-# Dependencies: git, bash (uses bashisms), comm, dd, head, sed, sort.
+# Dependencies: git, bash (uses bashisms), dd, sed.
 #
 # See also: dnsgit <https://github.com/ossobv/dnsgit/>
 # See also: mailgit <https://github.com/ossobv/mailgit/>
