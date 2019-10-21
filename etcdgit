@@ -207,7 +207,7 @@ update-all)
         xargs --no-run-if-empty -d'\n' git reset --quiet --
 
     # Attempt commit of text (interesting) changes first.
-    if git status --porcelain | grep -qv '^ '; then
+    if git status --porcelain | grep -qv '^[ ?]'; then
         # Remove local/staged chmod +x from all files we're touching here.
         git status --porcelain | sed -e '/^[AM] /!d;s/^...//' |
             xargs -d'\n' chmod -x
