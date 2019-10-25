@@ -134,6 +134,9 @@ key_to_path() {
     else
         path=${key#/}
     fi
+    # if ! [[ "$path" = *stolon-keeper* ]]; then
+    #     false
+    # fi
 }
 
 update_repo() {
@@ -192,28 +195,43 @@ update-all)
     git add -A
     ret=0
 
-    # All data/binary-changes go into a separate (silent) commit, in the second
-    # pass:
-    # - unset (expected) .compact_rev_key changes from the text commit
-    git reset --quiet ".compact_rev_key" 2>/dev/null || true
-    # - unset the binary-file-changes from the text commit
-    git status --porcelain | grep '^[AM] ' | sed -e 's/^...//' | while read f; do
-        test "$(file --brief "$f")" = data && git reset --quiet "$f"
-    done
-    # - unset deleted files that were considered binary from the text commit
-    git status --porcelain | sed -e '/^D.../!d;s/^...//' |
+    # Make all binary files +x and non-binary files -x
+    list=$(git status --porcelain | grep '^[AMR]. ' |
+        sed -e 's/^R. [^>]* -> //;s/^[AM]. //' |
+        while read f; do
+          test "$(file --brief "$f")" = data && echo "+$f" || echo "-$f"
+         done)
+    echo "$list" | sed -e '/^+/!d;s/^.//' |
+        xargs --no-run-if-empty -d'\n' chmod +x
+    echo "$list" | sed -e '/^-/!d;s/^.//' |
+        xargs --no-run-if-empty -d'\n' chmod -x
+    # Always consider .compact_rev_key as binary
+    chmod +x ".compact_rev_key" 2>/dev/null || true
+
+    # Re-add all changes.
+    git add -A
+    # Find all non-binary and unset from the first (binary only) commit.
+    find . -type f '!' -path './.git/*' '!' -perm /100 |
+        xargs --no-run-if-empty -d'\n' git reset --quiet --
+    # These deleted files used to be text. Also skip those.
+    git status --porcelain | sed -e '/^D. /!d;s/^.. //' |
         xargs --no-run-if-empty -d'\n' git ls-tree master |
-        sed -e '/^...7.. blob /!d;s/^...... blob [0-9a-f]\+[[:blank:]]*//' |
+        sed -e '/^...6.. blob /!d;s/^...... blob [0-9a-f]\+[[:blank:]]*//' |
         xargs --no-run-if-empty -d'\n' git reset --quiet --
 
-    # Attempt commit of text (interesting) changes first.
-    if git status --porcelain | grep -qv '^[ ?]'; then
-        # Remove local/staged chmod +x from all files we're touching here.
-        git status --porcelain | sed -e '/^[AM] /!d;s/^...//' |
-            xargs -d'\n' chmod -x
-        git status --porcelain | sed -e '/^[AM] /!d;s/^...//' |
-            git update-index --chmod=-x --stdin
+    # Do the first binary-only (silent) commit.
+    if git status --porcelain | grep -qv '[ ?]. '; then
+        msg="data: Data changes"  # be silent about this commit
+        git commit -m "$msg" >/dev/null || ret=$?
+        if test -t 1; then
+            # Is stdout a tty? Write a short summary.
+            echo "Committed: $msg"
+        fi
+    fi
 
+    # Re-add the rest (if any).
+    git add -A
+    if git status --porcelain | grep -qF ''; then
         msg=$(generate_commit_msg)
         git commit -m "$msg" >/dev/null || ret=$?
         if test -t 1; then
@@ -222,23 +240,6 @@ update-all)
         else
             # Otherwise output the entire change (for cron mail?).
             git show | head -n4096
-        fi
-    fi
-
-    # Is there anything left? Create binary commit too.
-    git add -A
-    if git status --porcelain | grep -qF ''; then
-        # Add local/staged chmod +x to all files we're touching here.
-        git status --porcelain | sed -e '/^[AM] /!d;s/^...//' |
-            xargs -d'\n' chmod -x
-        git status --porcelain | sed -e '/^[AM] /!d;s/^...//' |
-            git update-index --chmod=-x --stdin
-
-        msg="data: Data changes"  # be silent about this commit
-        git commit -m "$msg" >/dev/null || ret=$?
-        if test -t 1; then
-            # Is stdout a tty? Write a short summary.
-            echo "Committed: $msg"
         fi
     fi
 
